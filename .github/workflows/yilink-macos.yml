@@ -1,0 +1,309 @@
+# =====================================================================
+# YiLink（易连远程）macOS 客户端云构建 —— YiLink 裁剪版 workflow
+#
+# 来源：.github/workflows/flutter-build.yml（上游 RustDesk 1.5.0）
+#       分支 yilink-brand-1.5.0，基线 commit e9ddbd8f460dac1b30b9815ba324a5dadc8d97b0
+# 裁剪日期：2026-09-29
+#
+# 与上游 flutter-build.yml 的差异（job/step 逻辑均原样复制）：
+#   1. 仅保留 generate-bridge 与 build-for-macOS 两个 job；generate-sbom、
+#      build-RustDeskTempTopMostWindow、build-for-windows-*、build-rustdesk-ios、
+#      build-rustdesk-android*、build-rustdesk-linux*、publish_unsigned、
+#      build-rustdesk-web 等均不复制。build-for-macOS 未引用任何被删 job
+#      的输出（其唯一的跨 job 依赖是 needs: [generate-bridge] 产出的
+#      bridge-artifact，bridge.yml 已随源码保留）。
+#   2. 触发方式由 workflow_call 改为 workflow_dispatch（手工触发）；
+#      保留 input upload-tag（默认 yilink-test，仅预留，当前无步骤消费）。
+#   3. env 只保留 macOS 构建所需变量；删除 Windows/Android/iOS/Linux 专属
+#      变量（NDK_VERSION、ANDROID_*、FLUTTER_WINDOWS_ARM_VERSION、
+#      FLUTTER_ELINUX_VERSION、SCITER_*、ARMV7_*、CARGO_NDK_VERSION、
+#      LLVM_VERSION、VCPKG_CMAKE_VERSION、RUST_VERSION、SIGN_BASE_URL 等，
+#      其中 SIGN_BASE_URL 仅用于 Windows 签名服务）。UPLOAD_ARTIFACT 固定
+#      为 "true"，产物无条件经 actions/upload-artifact 上传，不依赖
+#      TAG_NAME/tag 发布步骤。
+#   4. 签名/公证步骤的 if 由上游 `env.MACOS_P12_BASE64 != null` 加固为
+#      `!= null && != ''`：未配置 secrets 时 workflow env 展开为空字符串，
+#      上游条件依赖表达式把空串与 null 都强转为 0 才判不相等，语义脆弱；
+#      加固后这些步骤在无 secrets 时确定跳过，构建落到 Xcode 的 ad-hoc
+#      签名（Release 配置 CODE_SIGN_IDENTITY = "-"，见
+#      flutter/macos/Runner.xcodeproj/project.pbxproj）。
+#   5. dmg 上传前统一改名为 yilink-<VERSION>-macos-<arch>.dmg；
+#      artifact 名称为 yilink-macos-<arch>。上游 "Upload unsigned macOS app"
+#      （供已删除的 publish_unsigned 消费）与 "Publish DMG package"
+#      （softprops 发布 release，依赖 TAG_NAME）两个步骤不复制。
+#   6. "Test cursor sizing" 原条件引用 workflow_call 输入
+#      inputs.upload-artifact（workflow_dispatch 下不存在），改为仅按
+#      aarch64 矩阵项执行。
+# =====================================================================
+
+name: Build YiLink macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        description: "Tag name reserved for release publishing (not used by artifact upload)"
+        required: false
+        default: "yilink-test"
+        type: string
+
+env:
+  MAC_RUST_VERSION: "1.81" # 1.81 is requred for macos, because of https://github.com/yury/cidre requires 1.81
+  FLUTTER_VERSION: "3.24.5"
+  TAG_NAME: "${{ inputs.upload-tag }}"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # vcpkg version: 2026.07.29
+  # If we change the `VCPKG COMMIT_ID`, please remember:
+  # 1. Call `$VCPKG_ROOT/vcpkg x-update-baseline` to update the baseline in `vcpkg.json`.
+  #  Or we may face build issue like
+  #  https://github.com/rustdesk/rustdesk/actions/runs/14414119794/job/40427970174
+  # 2. Update the `VCPKG_COMMIT_ID` in `ci.yml` and `playground.yml`.
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VERSION: "1.5.0"
+  #signing keys env variable checks
+  MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
+  UPLOAD_ARTIFACT: "true"
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-for-macOS:
+    name: ${{ matrix.job.target }}
+    runs-on: ${{ matrix.job.os }}
+    needs: [generate-bridge]
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - {
+              target: x86_64-apple-darwin,
+              os: macos-15-intel, #macos-latest or macos-14 use M1 now, https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#:~:text=14%20GB-,macos%2Dlatest%20or%20macos%2D14,-The%20macos%2Dlatestlabel
+              extra-build-args: "",
+              arch: x86_64,
+              vcpkg-triplet: x64-osx,
+            }
+          - {
+              target: aarch64-apple-darwin,
+              os: macos-14,
+              # extra-build-args: "--disable-flutter-texture-render", # disable this for mac, because we see a lot of users reporting flickering both on arm and x64, and we can not confirm if texture rendering has better performance if htere is no vram, https://github.com/rustdesk/rustdesk/issues/6296
+              extra-build-args: "--screencapturekit",
+              arch: aarch64,
+              vcpkg-triplet: arm64-osx,
+            }
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      # YiLink: if 条件在上游 `env.MACOS_P12_BASE64 != null` 基础上增加空串检查
+      - name: Import the codesign cert
+        if: env.MACOS_P12_BASE64 != null && env.MACOS_P12_BASE64 != ''
+        uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
+        with:
+          p12-file-base64: ${{ secrets.MACOS_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_P12_PASSWORD }}
+          keychain: rustdesk
+
+      - name: Check sign and import sign key
+        if: env.MACOS_P12_BASE64 != null && env.MACOS_P12_BASE64 != ''
+        run: |
+          security default-keychain -s rustdesk.keychain
+          security find-identity -v
+
+      - name: Import notarize key
+        if: env.MACOS_P12_BASE64 != null && env.MACOS_P12_BASE64 != ''
+        uses: timheuer/base64-to-file@adaa40c0c581f276132199d4cf60afa07ce60eac # v1.2
+        with:
+          # https://gregoryszorc.com/docs/apple-codesign/stable/apple_codesign_rcodesign.html#notarizing-and-stapling
+          fileName: rustdesk.json
+          fileDir: ${{ github.workspace }}
+          encodedString: ${{ secrets.MACOS_NOTARIZE_JSON }}
+
+      - name: Install rcodesign tool
+        if: env.MACOS_P12_BASE64 != null && env.MACOS_P12_BASE64 != ''
+        shell: bash
+        run: |
+          pushd /tmp
+          wget https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.22.0/apple-codesign-0.22.0-macos-universal.tar.gz
+          tar -zxvf apple-codesign-0.22.0-macos-universal.tar.gz
+          mv apple-codesign-0.22.0-macos-universal/rcodesign /usr/local/bin
+          popd
+
+      - name: Install build runtime
+        run: |
+          brew install llvm create-dmg
+          # pkg-config is handled in a separate step, because it may be already installed by `macos-latest`(14.7.1) runner
+          if command -v pkg-config &>/dev/null; then
+              echo "pkg-config is already installed"
+          else
+              brew install pkg-config
+          fi
+
+      - name: Install NASM
+        run: |
+          # Install NASM 2.16.x from official release.
+          # Do NOT use `brew install nasm` which installs NASM 3.x.
+          # NASM 3.x is a complete rewrite with incompatible CLI options and removed features.
+          # aom and other multimedia libraries require NASM 2.x for x86/x86_64 assembly.
+          wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+          unzip nasm-2.16.03-macosx.zip
+          sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
+          nasm --version
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Patch flutter
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          if [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
+
+      - name: Workaround for flutter issue
+        shell: bash
+        run: |
+          cd "$(dirname "$(which flutter)")"
+          # https://github.com/flutter/flutter/issues/133533
+          sed -i -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' ../packages/flutter/lib/src/scheduler/binding.dart
+          grep -n '_setFramesEnabledState(false);' ../packages/flutter/lib/src/scheduler/binding.dart
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: ${{ matrix.job.os }}
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      # YiLink: 上游条件为 `!inputs.upload-artifact && matrix.job.arch == 'aarch64'`，
+      # workflow_dispatch 下无该输入，改为仅按矩阵项执行
+      - name: Test cursor sizing
+        if: ${{ matrix.job.arch == 'aarch64' }}
+        working-directory: flutter
+        run: flutter test --timeout 60s test/cursor_size_test.dart test/cursor_replay_test.dart test/cursor_default_test.dart
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+
+      - name: Show version information (Rust, cargo, Clang)
+        shell: bash
+        run: |
+          clang --version || true
+          rustup -V
+          rustup toolchain list
+          rustup default
+          cargo -V
+          rustc -V
+
+      - name: Build rustdesk
+        run: |
+          if [ "${{ matrix.job.target }}" = "aarch64-apple-darwin" ]; then
+            MIN_MACOS_VERSION="12.3"
+            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/" build.py
+            sed -i -e "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/" flutter/macos/Podfile
+            sed -i -e "s/osx_minimum_system_version = \"[0-9]*.[0-9]*\"/osx_minimum_system_version = \"${MIN_MACOS_VERSION}\"/" Cargo.toml
+            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MIN_MACOS_VERSION};/" flutter/macos/Runner.xcodeproj/project.pbxproj
+          fi
+          ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
+
+      - name: create unsigned dmg
+        if: env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          CREATE_DMG="$(command -v create-dmg)"
+          CREATE_DMG="$(readlink -f "$CREATE_DMG")"
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
+
+      # YiLink: 上游 "Upload unsigned macOS app" 步骤不复制（其产物仅供已删除的
+      # publish_unsigned 汇总使用，最终产物由文末统一的 Upload 步骤上传）
+
+      - name: Codesign app and create signed dmg
+        # YiLink: 原条件为 `env.MACOS_P12_BASE64 != null && env.UPLOAD_ARTIFACT == 'true'`，
+        # 此处同样加固空串检查；未配置证书 secrets 时整步跳过，沿用 ad-hoc 签名
+        if: env.MACOS_P12_BASE64 != null && env.MACOS_P12_BASE64 != '' && env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          # Patch create-dmg to give more attempts to unmount image
+          CREATE_DMG="$(command -v create-dmg)"
+          CREATE_DMG="$(readlink -f "$CREATE_DMG")"
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          # Unlock keychain
+          security default-keychain -s rustdesk.keychain
+          security unlock-keychain -p ${{ secrets.MACOS_P12_PASSWORD }} rustdesk.keychain
+          # start sign the rustdesk.app and dmg
+          rm -rf *.dmg || true
+          # the identity secret carries its own shell quoting, so expand it inline like the dmg codesign below
+          bash ./.github/scripts/sign-macos-app.sh \
+            ./flutter/build/macos/Build/Products/Release/RustDesk.app \
+            ${{ secrets.MACOS_CODESIGN_IDENTITY }} \
+            ./flutter/macos/Runner/Release.entitlements
+          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
+          codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict rustdesk-${{ env.VERSION }}.dmg -vvv
+          # notarize the rustdesk-${{ env.VERSION }}.dmg
+          rcodesign notary-submit --api-key-path ${{ github.workspace }}/rustdesk.json  --staple rustdesk-${{ env.VERSION }}.dmg
+
+      - name: Rename rustdesk
+        if: env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          for name in rustdesk*??.dmg; do
+              mv "$name" "${name%%.dmg}-${{ matrix.job.arch }}.dmg"
+          done
+
+      # YiLink: 新增——把 rustdesk*.dmg 统一改名为 yilink-<VERSION>-macos-<arch>.dmg
+      # （同时消除上游 Rename rustdesk 在未签名路径下产生的重复 arch 后缀）
+      - name: Rename dmg to YiLink
+        run: |
+          for f in rustdesk*.dmg; do
+            if [ -e "$f" ]; then
+              mv "$f" "yilink-${{ env.VERSION }}-macos-${{ matrix.job.arch }}.dmg"
+            fi
+          done
+          ls -l ./*.dmg || true
+
+      # YiLink: 上游 "Publish DMG package"（softprops 发布 release，依赖 TAG_NAME）
+      # 不复制，改为无条件上传 artifact，不依赖 tag/发布步骤
+      - name: Upload YiLink macOS dmg
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yilink-macos-${{ matrix.job.arch }}
+          path: yilink-*.dmg
