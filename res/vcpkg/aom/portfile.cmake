@@ -8,27 +8,20 @@ vcpkg_find_acquire_program(PERL)
 get_filename_component(PERL_PATH ${PERL} DIRECTORY)
 vcpkg_add_to_path(${PERL_PATH})
 
-if(DEFINED ENV{USE_AOM_391})
-    set(AOM_CONFIG_PATH "lib/cmake/aom")
-    vcpkg_from_git(
-        OUT_SOURCE_PATH SOURCE_PATH
-        URL "https://aomedia.googlesource.com/aom"
-        REF 8ad484f8a18ed1853c094e7d3a4e023b2a92df28 # 3.9.1
-        PATCHES
-            aom-uninitialized-pointer-3.9.1.diff
-            aom-avx2.diff
-            aom-install.diff
-    )
-else()
-    set(AOM_CONFIG_PATH "lib/cmake/AOM")
-    vcpkg_from_git(
-        OUT_SOURCE_PATH SOURCE_PATH
-        URL "https://aomedia.googlesource.com/aom"
-        REF 03087864cf4bea6abb0d28f95cf7843511413d8f # 3.14.1
-        PATCHES
-            aom-uninitialized-pointer.diff
-    )
-endif()
+# [YiLink] 固定使用 aom 3.9.1 分支：本机网络无法路由 aomedia.googlesource.com，
+# 且 GitHub 上所有现存镜像均不含 3.14.1 提交 SHA；ScuffleCloud/aom-mirror 含 3.9.1 同 SHA 提交。
+# git commit SHA 即内容寻址，镜像拉到的对象与上游逐字节一致；原 3.14.1 分支可在网络恢复后还原。
+set(AOM_CONFIG_PATH "lib/cmake/aom")
+vcpkg_from_git(
+    OUT_SOURCE_PATH SOURCE_PATH
+    URL "https://github.com/ScuffleCloud/aom-mirror"
+    REF 8ad484f8a18ed1853c094e7d3a4e023b2a92df28 # 3.9.1
+    PATCHES
+        aom-uninitialized-pointer-3.9.1.diff
+        aom-avx2.diff
+        aom-install.diff
+        aom-nasm3-compat.diff
+)
 
 set(aom_target_cpu "")
 if(VCPKG_TARGET_IS_UWP OR (VCPKG_TARGET_IS_WINDOWS AND VCPKG_TARGET_ARCHITECTURE MATCHES "^arm"))

@@ -3731,6 +3731,9 @@ Color? disabledTextColor(BuildContext context, bool enabled) {
 }
 
 Widget loadPowered(BuildContext context) {
+  // [YiLink] 纯局域网产品：移除 "Powered by RustDesk" 公网页脚（关于页保留 AGPL 许可与上游致谢）。
+  return SizedBox.shrink();
+  // ignore: dead_code
   if (bind.mainGetBuildinOption(key: "hide-powered-by-me") == 'Y') {
     return SizedBox.shrink();
   }

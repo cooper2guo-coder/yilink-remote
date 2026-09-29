@@ -1,0 +1,19 @@
+diff --git a/build/cmake/aom_optimization.cmake b/build/cmake/aom_optimization.cmake
+--- a/build/cmake/aom_optimization.cmake
++++ b/build/cmake/aom_optimization.cmake
+@@ -214,7 +214,14 @@ function(test_nasm)
+   execute_process(COMMAND ${CMAKE_ASM_NASM_COMPILER} -hf
+                   OUTPUT_VARIABLE nasm_helptext)
+ 
++  # [YiLink] NASM 3.x: "-hf" lists output formats only; optimization flags
++  # moved into "-h" output (shown as "-Oflags"). Merge both so the checks
++  # below work with both NASM 2.x (-Ox in -hf) and NASM 3.x (-Oflags in -h).
++  execute_process(COMMAND ${CMAKE_ASM_NASM_COMPILER} -h
++                  OUTPUT_VARIABLE nasm_opts_helptext)
++  set(nasm_helptext "${nasm_helptext}${nasm_opts_helptext}")
++
+-  if(NOT "${nasm_helptext}" MATCHES "-Ox")
++  if(NOT "${nasm_helptext}" MATCHES "-O(x|flags)")
+     message(
+       FATAL_ERROR "Unsupported nasm: multipass optimization not supported.")
+   endif()
